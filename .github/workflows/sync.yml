@@ -3,7 +3,7 @@ name: Apple Music to GDrive Sync
 on:
   schedule:
     - cron: '0 */6 * * *'  # Runs automatically every 6 hours
-  workflow_dispatch:       # Allows you to click "Run workflow" manually anytime
+  workflow_dispatch:       # Allows manual triggers
 
 jobs:
   sync:
@@ -20,19 +20,20 @@ jobs:
 
       - name: Install System Dependencies
         run: |
-          sudo apt update
-          sudo apt install -y ffmpeg rclone
-          pip install yt-dlp
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg rclone
+          pip install --upgrade yt-dlp
 
       - name: Restore Rclone Config
+        env:
+          RCLONE_CONF_DATA: ${{ secrets.RCLONE_CONFIG }}
         run: |
           mkdir -p ~/.config/rclone
-          echo "${{ secrets.RCLONE_CONFIG_BASE64 }}" | base64 -d > ~/.config/rclone/rclone.conf
+          echo "$RCLONE_CONF_DATA" > ~/.config/rclone/rclone.conf
 
       - name: Pull Existing Music from Google Drive
         run: |
           mkdir -p music_library
-          # Download whatever is already in Drive so yt-dlp doesn't re-download them
           rclone copy "gdrive:Music/AppleMusic" ./music_library --progress || true
 
       - name: Run Scraper & Downloader
@@ -43,5 +44,4 @@ jobs:
 
       - name: Sync Library to Google Drive
         run: |
-          # 'sync' copies new downloads and purges any songs removed from the playlist
           rclone sync ./music_library "gdrive:Music/AppleMusic" --progress
