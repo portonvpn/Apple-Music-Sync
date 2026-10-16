@@ -71,12 +71,13 @@ if not target_songs:
             except Exception:
                 pass
 
-# Method 3: Regex fallback
+# Method 3: Regex fallbacks
 if not target_songs:
     matches = re.findall(r'\"(?:title|name)\":\"([^\"]+)\"[^\{\}\[\]]*?\"artistName\":\"([^\"]+)\"', html)
     for title, artist in matches:
         target_songs.append({"artist": artist, "title": title})
 
+# Deduplicate songs
 unique_songs = []
 seen = set()
 for s in target_songs:
@@ -85,32 +86,29 @@ for s in target_songs:
         seen.add(key)
         unique_songs.append(s)
 
-print(f"Detected {len(unique_songs)} songs in playlist.")
+print(f"Detected {len(unique_songs)} unique songs in playlist.")
 
 def sanitize(val):
     return re.sub(r'[\\/*?:"<>|]', "", val).strip()
 
-# --- TEST MODE: PROCESS EXACTLY ONE SONG ---
-downloaded_count = 0
+expected_filenames = set()
 
+# Process every song
 for song in unique_songs:
-    if downloaded_count >= 1:
-        print("\n[TEST MODE] Reached 1 song limit. Stopping download loop.")
-        break
-
     artist = song["artist"]
     title = song["title"]
     base_name = f"{sanitize(artist)} - {sanitize(title)}" if artist else sanitize(title)
     expected_filename = f"{base_name}.m4a"
-    file_path = os.path.join(LOCAL_DIR, expected_filename)
+    expected_filenames.add(expected_filename)
 
+    file_path = os.path.join(LOCAL_DIR, expected_filename)
     if os.path.exists(file_path):
-        print(f"Skipping already existing: {expected_filename}")
+        print(f"Skipping already cached: {expected_filename}")
         continue
 
-    print(f"\n---> [TEST] Attempting fetch for 1 song: {artist} - {title}")
+    print(f"\n---> Fetching: {artist} - {title}")
 
-    # Primary: YouTube Music with mobile client spoofing
+    # Primary attempt: YouTube Music via Android spoofing
     yt_query = f"ytsearch1:{artist} {title} audio"
     cmd_yt = [
         "yt-dlp",
@@ -123,9 +121,9 @@ for song in unique_songs:
     ]
     res = subprocess.run(cmd_yt)
 
-    # Secondary Fallback: SoundCloud if YouTube blocks runner IP
+    # Secondary attempt: SoundCloud fallback if YouTube blocks runner IP
     if res.returncode != 0 or not os.path.exists(file_path):
-        print(f"YouTube attempt blocked. Trying SoundCloud fallback for: {artist} - {title}")
+        print(f"YouTube search blocked/failed. Trying SoundCloud fallback for: {artist} - {title}")
         sc_query = f"scsearch1:{artist} {title}"
         cmd_sc = [
             "yt-dlp",
@@ -135,12 +133,15 @@ for song in unique_songs:
             "--embed-metadata",
             "-o", file_path
         ]
-        res = subprocess.run(cmd_sc)
+        subprocess.run(cmd_sc)
 
-    if os.path.exists(file_path):
-        print(f"Successfully downloaded 1 test song: {file_path}")
-        downloaded_count += 1
-    else:
-        print(f"Failed to fetch test song: {artist} - {title}")
+    if not os.path.exists(file_path):
+        print(f"Warning: Could not fetch {artist} - {title} from any source.")
 
-print("\nTest sync script execution finished.")
+# Mirror deletions: purge files that are no longer in the playlist
+for fname in os.listdir(LOCAL_DIR):
+    if fname.endswith(".m4a") and fname not in expected_filenames:
+        print(f"Deleting removed song: {fname}")
+        os.remove(os.path.join(LOCAL_DIR, fname))
+
+print("\nFull library sync cycle complete.")
