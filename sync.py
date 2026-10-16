@@ -48,14 +48,13 @@ for block in data_blocks:
     except Exception:
         pass
 
-# Method 2: Inspect all JSON script blobs if Method 1 didn't find tracks
+# Method 2: Inspect application/json scripts
 if not target_songs:
     script_tags = re.findall(r'<script[^>]*type=["\']application/json["\'][^>]*>(.*?)</script>', html, re.DOTALL)
     for tag in script_tags:
         if '"artistName"' in tag and '"title"' in tag:
             try:
                 blob = json.loads(tag.strip())
-                # Recursive track finder
                 def walk(obj):
                     if isinstance(obj, dict):
                         if "title" in obj and "artistName" in obj:
@@ -72,14 +71,12 @@ if not target_songs:
             except Exception:
                 pass
 
-# Method 3: Regex fallbacks across page source
+# Method 3: Regex fallback
 if not target_songs:
-    # Matches patterns like {"title":"Song Name","artistName":"Artist"}
     matches = re.findall(r'\"(?:title|name)\":\"([^\"]+)\"[^\{\}\[\]]*?\"artistName\":\"([^\"]+)\"', html)
     for title, artist in matches:
         target_songs.append({"artist": artist, "title": title})
 
-# Deduplicate songs in the scraped list
 unique_songs = []
 seen = set()
 for s in target_songs:
@@ -93,38 +90,57 @@ print(f"Detected {len(unique_songs)} songs in playlist.")
 def sanitize(val):
     return re.sub(r'[\\/*?:"<>|]', "", val).strip()
 
-expected_filenames = set()
+# --- TEST MODE: PROCESS EXACTLY ONE SONG ---
+downloaded_count = 0
 
 for song in unique_songs:
+    if downloaded_count >= 1:
+        print("\n[TEST MODE] Reached 1 song limit. Stopping download loop.")
+        break
+
     artist = song["artist"]
     title = song["title"]
     base_name = f"{sanitize(artist)} - {sanitize(title)}" if artist else sanitize(title)
     expected_filename = f"{base_name}.m4a"
-    expected_filenames.add(expected_filename)
-
     file_path = os.path.join(LOCAL_DIR, expected_filename)
+
     if os.path.exists(file_path):
-        print(f"Skipping existing: {expected_filename}")
+        print(f"Skipping already existing: {expected_filename}")
         continue
 
-    query = f"ytsearch1:{artist} {title} official audio"
-    print(f"\n---> Fetching: {artist} - {title}")
-    
-    cmd = [
+    print(f"\n---> [TEST] Attempting fetch for 1 song: {artist} - {title}")
+
+    # Primary: YouTube Music with mobile client spoofing
+    yt_query = f"ytsearch1:{artist} {title} audio"
+    cmd_yt = [
         "yt-dlp",
-        query,
+        yt_query,
         "-x",
         "--audio-format", "m4a",
         "--embed-metadata",
-        "--embed-thumbnail",
+        "--extractor-args", "youtube:player_client=android",
         "-o", file_path
     ]
-    subprocess.run(cmd)
+    res = subprocess.run(cmd_yt)
 
-# Delete songs from local folder if they were removed from Apple Music
-for fname in os.listdir(LOCAL_DIR):
-    if fname.endswith(".m4a") and fname not in expected_filenames:
-        print(f"Deleting removed song: {fname}")
-        os.remove(os.path.join(LOCAL_DIR, fname))
+    # Secondary Fallback: SoundCloud if YouTube blocks runner IP
+    if res.returncode != 0 or not os.path.exists(file_path):
+        print(f"YouTube attempt blocked. Trying SoundCloud fallback for: {artist} - {title}")
+        sc_query = f"scsearch1:{artist} {title}"
+        cmd_sc = [
+            "yt-dlp",
+            sc_query,
+            "-x",
+            "--audio-format", "m4a",
+            "--embed-metadata",
+            "-o", file_path
+        ]
+        res = subprocess.run(cmd_sc)
 
-print("\nSync completed successfully.")
+    if os.path.exists(file_path):
+        print(f"Successfully downloaded 1 test song: {file_path}")
+        downloaded_count += 1
+    else:
+        print(f"Failed to fetch test song: {artist} - {title}")
+
+print("\nTest sync script execution finished.")
