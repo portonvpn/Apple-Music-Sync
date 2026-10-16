@@ -15,44 +15,87 @@ if not PLAYLIST_URL:
 print(f"Scraping playlist: {PLAYLIST_URL}")
 req = urllib.request.Request(
     PLAYLIST_URL,
-    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
 )
-html = urllib.request.urlopen(req).read().decode("utf-8")
+
+try:
+    with urllib.request.urlopen(req) as resp:
+        html = resp.read().decode("utf-8")
+except Exception as e:
+    print(f"Failed to fetch Apple Music webpage: {e}")
+    exit(1)
 
 target_songs = []
-scripts = re.findall(r'<script type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL)
 
-for raw_json in scripts:
+# Method 1: Parse serialized-server-data
+data_blocks = re.findall(r'<script[^>]*id=["\']serialized-server-data["\'][^>]*>(.*?)</script>', html, re.DOTALL)
+for block in data_blocks:
     try:
-        data = json.loads(raw_json.strip())
-        items = data.get("track", []) or data.get("itemListElement", [])
-        for item in items:
-            song_obj = item.get("item", item)
-            name = song_obj.get("name", "").strip()
-            artist = ""
-            by_artist = song_obj.get("byArtist", [])
-            if isinstance(by_artist, list) and by_artist:
-                artist = by_artist[0].get("name", "").strip()
-            elif isinstance(by_artist, dict):
-                artist = by_artist.get("name", "").strip()
-            if name:
-                target_songs.append({"artist": artist, "title": name})
+        parsed = json.loads(block.strip())
+        if isinstance(parsed, list):
+            for entry in parsed:
+                data = entry.get("data", {})
+                sections = data.get("sections", [])
+                for sec in sections:
+                    for item in sec.get("items", []):
+                        title = item.get("title")
+                        artist = item.get("artistName")
+                        if title and artist:
+                            target_songs.append({"artist": artist, "title": title})
     except Exception:
-        continue
+        pass
 
+# Method 2: Inspect all JSON script blobs if Method 1 didn't find tracks
 if not target_songs:
-    matches = re.findall(r'"songName":"([^"]+)".*?"artistName":"([^"]+)"', html)
+    script_tags = re.findall(r'<script[^>]*type=["\']application/json["\'][^>]*>(.*?)</script>', html, re.DOTALL)
+    for tag in script_tags:
+        if '"artistName"' in tag and '"title"' in tag:
+            try:
+                blob = json.loads(tag.strip())
+                # Recursive track finder
+                def walk(obj):
+                    if isinstance(obj, dict):
+                        if "title" in obj and "artistName" in obj:
+                            t = obj.get("title")
+                            a = obj.get("artistName")
+                            if isinstance(t, str) and isinstance(a, str):
+                                target_songs.append({"artist": a, "title": t})
+                        for v in obj.values():
+                            walk(v)
+                    elif isinstance(obj, list):
+                        for el in obj:
+                            walk(el)
+                walk(blob)
+            except Exception:
+                pass
+
+# Method 3: Regex fallbacks across page source
+if not target_songs:
+    # Matches patterns like {"title":"Song Name","artistName":"Artist"}
+    matches = re.findall(r'\"(?:title|name)\":\"([^\"]+)\"[^\{\}\[\]]*?\"artistName\":\"([^\"]+)\"', html)
     for title, artist in matches:
         target_songs.append({"artist": artist, "title": title})
 
-print(f"Detected {len(target_songs)} songs in playlist.")
+# Deduplicate songs in the scraped list
+unique_songs = []
+seen = set()
+for s in target_songs:
+    key = f"{s['artist']} - {s['title']}".lower()
+    if key not in seen:
+        seen.add(key)
+        unique_songs.append(s)
+
+print(f"Detected {len(unique_songs)} songs in playlist.")
 
 def sanitize(val):
     return re.sub(r'[\\/*?:"<>|]', "", val).strip()
 
 expected_filenames = set()
 
-for song in target_songs:
+for song in unique_songs:
     artist = song["artist"]
     title = song["title"]
     base_name = f"{sanitize(artist)} - {sanitize(title)}" if artist else sanitize(title)
@@ -61,10 +104,11 @@ for song in target_songs:
 
     file_path = os.path.join(LOCAL_DIR, expected_filename)
     if os.path.exists(file_path):
+        print(f"Skipping existing: {expected_filename}")
         continue
 
     query = f"ytsearch1:{artist} {title} official audio"
-    print(f"Fetching: {artist} - {title}")
+    print(f"\n---> Fetching: {artist} - {title}")
     
     cmd = [
         "yt-dlp",
@@ -77,9 +121,10 @@ for song in target_songs:
     ]
     subprocess.run(cmd)
 
+# Delete songs from local folder if they were removed from Apple Music
 for fname in os.listdir(LOCAL_DIR):
     if fname.endswith(".m4a") and fname not in expected_filenames:
         print(f"Deleting removed song: {fname}")
         os.remove(os.path.join(LOCAL_DIR, fname))
 
-print("Sync completed.")
+print("\nSync completed successfully.")
